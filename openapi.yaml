@@ -1,0 +1,111 @@
+openapi: 3.0.0
+info:
+  title: Parcel archive API
+  version: 1.0.0
+paths:
+  /tasks:
+    post:
+      operationId: enqueueParcel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, name]
+              properties:
+                url: {type: string, format: uri, maxLength: 4096, pattern: '^https?://[^\s/?#]+[^\s]*$'}
+                name: {type: string, minLength: 1, maxLength: 255, not: {enum: ['.', '..']}, pattern: '^[^:/\\\x00-\x1f\x7f]+$'}
+            example:
+              url: 'https://www.rfc-editor.org/rfc/rfc20.txt'
+              name: rfc20.txt
+      x-yc-apigateway-validator:
+        validateRequestBody: true
+      x-yc-apigateway-integration:
+        type: cloud_ymq
+        action: SendMessage
+        queue_url: '${queue}'
+        folder_id: '${folder}'
+        service_account_id: '${actor}'
+        payload_format_type: body
+      responses:
+        '200': {description: Enqueued, x-yc-status-mapping: 202}
+        '202': {description: Accepted}
+        '400': {description: Invalid task}
+  /archives:
+    get:
+      operationId: browseCatalog
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: Scan
+        database: '${db}'
+        table_name: archives
+        service_account_id: '${actor}'
+      responses:
+        '200':
+          description: Archive records
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Record'}}
+  /archives/{key}:
+    get:
+      operationId: readRecord
+      x-yc-apigateway-validator:
+        validateResponseBody: true
+        validationErrorHandler:
+          x-yc-apigateway-integration:
+            type: dummy
+            http_code: 200
+            content:
+              application/json: '{"error":"Archive record unavailable"}'
+            http_headers:
+              Content-Type: application/json
+          statusCode: 404
+      parameters:
+        - {$ref: '#/components/parameters/key'}
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: GetItem
+        database: '${db}'
+        table_name: archives
+        key: '{"key":"{key}"}'
+        service_account_id: '${actor}'
+      responses:
+        '200':
+          description: Archive record
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Record'}
+        '404': {description: Unknown record}
+  /download/{key}:
+    get:
+      operationId: fetchZip
+      parameters:
+        - {$ref: '#/components/parameters/key'}
+      x-yc-apigateway-integration:
+        type: object_storage
+        bucket: '${bucket}'
+        object: '{key}'
+        service_account_id: '${actor}'
+      responses:
+        '200':
+          description: ZIP file
+          content:
+            application/zip:
+              schema: {type: string, format: binary}
+        '404': {description: Unknown object}
+components:
+  schemas:
+    Record:
+      type: object
+      required: [name, url, key]
+      properties:
+        name: {type: string}
+        url: {type: string, format: uri}
+        key: {type: string, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.zip$'}
+  parameters:
+    key:
+      name: key
+      in: path
+      required: true
+      schema: {type: string}
